@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Norwegian IP Search — x402 agent</title>
+<meta name="description" content="Search trademarks, patents, and designs from Patentstyret — Norway's IP office. Pay per query with USDC via x402.">
+<meta property="og:title" content="Norwegian IP Search">
+<meta property="og:description" content="Pay-per-query trademark, patent, and design lookups for Norway.">
+<meta property="og:type" content="website">
+<style>
+  :root { --bg: #0b0d10; --panel: #14181c; --panel-2: #1c2127;
+    --fg: #e6edf3; --muted: #8b949e;
+    --accent: #79c0ff; --accent-2: #a5d6ff; --good: #56d364;
+    --line: #30363d; --code-bg: #0d1117; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    line-height: 1.55; font-size: 16px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-2); text-decoration: underline; }
+  main { max-width: 880px; margin: 0 auto; padding: 4rem 1.25rem 6rem; }
+  h1 { font-size: 2.25rem; margin: 0 0 0.4rem;
+    background: linear-gradient(90deg,#79c0ff 0%,#a5d6ff 50%,#d2a8ff 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  h2 { font-size: 1.15rem; margin: 2.5rem 0 1rem; color: var(--accent); font-weight: 600; }
+  p.tagline { color: var(--muted); font-size: 1.1rem; margin: 0 0 1.5rem; }
+  .badges { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .badge { background: var(--panel-2); border: 1px solid var(--line);
+    padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.8rem; color: var(--muted); }
+  .badge strong { color: var(--fg); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 0.65rem 0.9rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); font-weight: 600; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  tr:last-child td { border-bottom: none; }
+  td.path code { color: var(--accent); }
+  td.price { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  td.price.free { color: var(--muted); }
+  td.price.paid { color: var(--good); }
+  pre, code { font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace; font-size: 0.875rem; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; overflow-x: auto; }
+  code { background: var(--panel-2); padding: 0.1em 0.4em; border-radius: 4px; }
+  pre code { background: transparent; padding: 0; }
+  footer { margin-top: 5rem; padding-top: 2rem; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 0.9rem;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+  .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+    background: rgba(86,211,100,0.12); color: var(--good);
+    border: 1px solid rgba(86,211,100,0.3);
+    font-size: 0.78rem; font-weight: 500; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Norwegian IP Search</h1>
+    <p class="tagline">Search trademarks, patents, and designs from Patentstyret — Norway's IP office. Built for AI agents.</p>
+    <div class="badges">
+      <span class="badge"><strong>x402</strong> micropayments</span>
+      <span class="badge"><strong>USDC</strong> on Base</span>
+      <span class="badge">Patentstyret</span>
+      <span class="badge">No API key</span>
+    </div>
+  </header>
+
+  <h2>Endpoints</h2>
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Price</th><th>What you get</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td class="path"><code>/trademark/search?q</code></td><td class="price paid">$0.01</td><td>Trademark text search (top 20)</td></tr>
+      <tr><td>GET</td><td class="path"><code>/trademark/{app_number}</code></td><td class="price paid">$0.01</td><td>Full trademark detail</td></tr>
+      <tr><td>GET</td><td class="path"><code>/patent/search?q</code></td><td class="price paid">$0.01</td><td>Patent text search</td></tr>
+      <tr><td>GET</td><td class="path"><code>/patent/{app_number}</code></td><td class="price paid">$0.02</td><td>Full patent record (claims, abstract)</td></tr>
+      <tr><td>GET</td><td class="path"><code>/design/search?q</code></td><td class="price paid">$0.01</td><td>Registered design search</td></tr>
+      <tr><td>GET</td><td class="path"><code>/classes</code></td><td class="price free">free</td><td>Nice classification (45 classes)</td></tr>
+      <tr><td>GET</td><td class="path"><code>/health</code></td><td class="price free">free</td><td>Health check</td></tr>
+      <tr><td>GET</td><td class="path"><code>/.well-known/x402.json</code></td><td class="price free">free</td><td>Agent-discovery manifest</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Example</h2>
+  <pre><code>$ curl 'https://x402-norway-ip.fly.dev/trademark/search?q=equinor'
+
+{
+  "results": [
+    {
+      "name": "EQUINOR",
+      "application_number": "201712345",
+      "status": "Registered",
+      "owner": "Equinor ASA",
+      "filing_date": "2017-11-15",
+      "classes": [4, 37, 42]
+    }
+  ],
+  "total": 1
+}</code></pre>
+
+  <h2>Source &amp; freshness</h2>
+  <p>Data from <a href="https://developer.patentstyret.no" rel="noopener">Patentstyret's developer portal</a>. We hold an Azure APIM subscription key server-side so callers never need to register with Patentstyret. Search results cached 24 h; full detail responses cached 7 d. Each response carries an <code>X-Cache: HIT|MISS</code> header.</p>
+
+  <footer>
+    <span><span class="pill">x402</span> &nbsp;Part of <a href="http://x402agent.no">x402agent.no</a></span>
+    <span>Data: <a href="https://www.patentstyret.no">Patentstyret</a></span>
+  </footer>
+</main>
+</body>
+</html>

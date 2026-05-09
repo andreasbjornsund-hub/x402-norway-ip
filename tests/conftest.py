@@ -1,4 +1,4 @@
-"""Shared pytest fixtures."""
+"""Shared pytest fixtures for x402-norway-ip."""
 import os
 import sys
 
@@ -10,50 +10,75 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 @pytest.fixture(scope="session")
 def main_module():
-    """Import main.py with stubbed env so it doesn't talk to anything real."""
     os.environ.setdefault("EVM_ADDRESS", "0xTEST0000000000000000000000000000000000")
-
+    # Default: API key SET so tests exercise the happy path. Tests that need
+    # the missing-key path use monkeypatch.delenv directly.
+    os.environ.setdefault("PATENTSTYRET_API_KEY", "test-subscription-key")
     os.chdir(REPO_ROOT)
     if REPO_ROOT not in sys.path:
         sys.path.insert(0, REPO_ROOT)
-
     import main
     return main
 
 
+@pytest.fixture
+def parsers_module(main_module):
+    import parsers
+    return parsers
+
+
+@pytest.fixture
+def ps_module(main_module):
+    import patentstyret_client
+    return patentstyret_client
+
+
+@pytest.fixture
+def nice_module(main_module):
+    import nice_classes
+    return nice_classes
+
+
+@pytest.fixture(autouse=True)
+def reset_cache(main_module):
+    import cache
+    cache.reset()
+    yield
+
+
 class FakeResponse:
-    def __init__(self, status_code: int, json_data: dict | None = None):
+    def __init__(self, status_code, json_data=None, text=""):
         self.status_code = status_code
-        self._json_data = json_data or {}
+        self._json = json_data if json_data is not None else {}
+        self.text = text
 
-    def json(self) -> dict:
-        return self._json_data
+    def json(self):
+        return self._json
 
 
-class FakeHTTPClient:
-    """Records calls and returns canned responses keyed by URL substring."""
+class FakePS:
+    """Stub for httpx.AsyncClient — Patentstyret uses GET only."""
 
     def __init__(self):
         self.responses: dict[str, FakeResponse] = {}
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[str, dict, dict]] = []  # (url, params, headers)
 
-    def stub(self, url_contains: str, status_code: int, json_data: dict | None = None):
-        self.responses[url_contains] = FakeResponse(status_code, json_data)
+    def stub(self, url_contains, status, json_data=None):
+        self.responses[url_contains] = FakeResponse(status, json_data)
 
-    async def get(self, url: str, params: dict | None = None) -> FakeResponse:
-        self.calls.append((url, params or {}))
-        for needle, resp in self.responses.items():
+    async def get(self, url, params=None, headers=None):
+        self.calls.append((url, dict(params or {}), dict(headers or {})))
+        for needle, r in self.responses.items():
             if needle in url:
-                return resp
-        return FakeResponse(404, {"error": f"unstubbed url: {url}"})
+                return r
+        return FakeResponse(404, {"error": f"unstubbed {url}"})
 
     async def aclose(self):
         pass
 
 
 @pytest.fixture
-def fake_http(main_module, monkeypatch):
-    """Replace main._http with a FakeHTTPClient."""
-    fake = FakeHTTPClient()
-    monkeypatch.setattr(main_module, "_http", fake)
-    return fake
+def fake_ps(main_module, monkeypatch):
+    f = FakePS()
+    monkeypatch.setattr(main_module, "_http", f)
+    return f

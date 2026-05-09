@@ -1,28 +1,46 @@
 """
-x402 Agent — REPLACE THIS DESCRIPTION
+x402-norway-ip — Norwegian IP Search
+
+x402 micropayment API wrapping Patentstyret's trademark, patent, and design
+APIs into a single agent-friendly service.
 
 Endpoints (free):
-  GET /                   — landing page (HTML or JSON)
-  GET /health             — health check
-  GET /api-status         — uptime + cache shape (operational visibility)
-  GET /services.json      — agent-readable services manifest
-  GET /llms.txt           — LLMs.txt for AI crawlers
-  GET /robots.txt         — robots policy
-  GET /.well-known/x402.json — x402 agent-discovery manifest
+  GET /                       — landing page (HTML or JSON)
+  GET /health                 — health check
+  GET /api-status             — uptime + cache shape + upstream readiness
+  GET /classes                — Nice classification reference data (45 classes)
+  GET /services.json          — agent-readable services manifest
+  GET /llms.txt               — LLMs.txt for AI crawlers
+  GET /robots.txt             — robots policy
+  GET /.well-known/x402.json  — x402 agent-discovery manifest
 
-Endpoints (paid — REPLACE):
-  GET /example             — $0.01: replace with your paid endpoint
+Endpoints (paid, USDC on Base):
+  GET /trademark/search       $0.01    text search across registered marks
+  GET /trademark/{app}        $0.01    full trademark details
+  GET /patent/search          $0.01    patent text search
+  GET /patent/{app}           $0.02    full patent record (claims, abstract)
+  GET /design/search          $0.01    registered design search
+
+Data: Patentstyret (https://developer.patentstyret.no). API requires a free
+subscription key set as PATENTSTYRET_API_KEY (Fly secret). Without that,
+upstream-dependent endpoints return 503 with a clear instruction; /health,
+/classes, and the discovery endpoints still work.
 """
-
 import os
 import time
 from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+
+import cache
+import nice_classes
+import parsers
+import patentstyret_client as ps
+from patentstyret_client import PatentstyretError
 
 from cdp_auth import create_cdp_auth_provider
 
@@ -37,22 +55,18 @@ load_dotenv()
 
 # ── Config ──────────────────────────────────────────────────────────
 
-# Override these for each agent. Defaults match the shared payTo wallet.
-SERVICE_ID = os.getenv("SERVICE_ID", "x402-agent-template")
-SERVICE_NAME = os.getenv("SERVICE_NAME", "x402 Agent Template")
-SERVICE_DESCRIPTION = os.getenv(
-    "SERVICE_DESCRIPTION",
-    "REPLACE: short description of what this agent does. Pay per query with USDC via x402.",
+SERVICE_ID = "norway-ip"
+SERVICE_NAME = "Norwegian IP Search"
+SERVICE_DESCRIPTION = (
+    "Search trademarks, patents, and designs from Patentstyret — Norway's "
+    "Industrial Property Office. Pay per query with USDC via x402."
 )
-SERVICE_CATEGORY = os.getenv("SERVICE_CATEGORY", "data")
+SERVICE_CATEGORY = "data"
 
 EVM_ADDRESS = os.getenv("EVM_ADDRESS")
-EVM_NETWORK: Network = "eip155:8453"  # Base mainnet
+EVM_NETWORK: Network = "eip155:8453"
 FACILITATOR_URL = os.getenv("FACILITATOR_URL", "https://x402.org/facilitator")
-SITE_URL = os.getenv("SITE_URL", f"https://{SERVICE_ID}.fly.dev")
-
-# USDC contract on Base mainnet — embedded in agent-discovery manifests so
-# payers can sign EIP-3009 transferWithAuthorization without an extra lookup.
+SITE_URL = os.getenv("SITE_URL", "https://x402-norway-ip.fly.dev")
 USDC_BASE_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
 if not EVM_ADDRESS:
@@ -77,8 +91,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── x402 payment middleware ─────────────────────────────────────────
-
 import json as _json
 
 cdp_auth = None
@@ -86,10 +98,6 @@ if "cdp.coinbase.com" in FACILITATOR_URL:
     cdp_auth = create_cdp_auth_provider()
 facilitator_config = FacilitatorConfig(url=FACILITATOR_URL, auth_provider=cdp_auth)
 facilitator = HTTPFacilitatorClient(facilitator_config)
-
-# ── V2→V1 conversion shim for CDP facilitator ──────────────────────
-# CDP only supports x402 v1; the SDK speaks v2. This shim translates
-# in both directions. Keep verbatim — modifying it breaks payments.
 
 _CAIP2_TO_V1 = {"eip155:8453": "base", "eip155:84532": "base-sepolia"}
 
@@ -135,15 +143,11 @@ _orig_settle = facilitator._settle_http
 
 
 async def _v1_verify(version, payload_dict, requirements_dict):
-    v1_payload = _v2_payload_to_v1(payload_dict)
-    v1_reqs = _v2_requirements_to_v1(requirements_dict)
-    return await _orig_verify(1, v1_payload, v1_reqs)
+    return await _orig_verify(1, _v2_payload_to_v1(payload_dict), _v2_requirements_to_v1(requirements_dict))
 
 
 async def _v1_settle(version, payload_dict, requirements_dict):
-    v1_payload = _v2_payload_to_v1(payload_dict)
-    v1_reqs = _v2_requirements_to_v1(requirements_dict)
-    return await _orig_settle(1, v1_payload, v1_reqs)
+    return await _orig_settle(1, _v2_payload_to_v1(payload_dict), _v2_requirements_to_v1(requirements_dict))
 
 
 facilitator._verify_http = _v1_verify
@@ -153,47 +157,110 @@ server = x402ResourceServer(facilitator)
 server.register(EVM_NETWORK, ExactEvmServerScheme())
 
 # ── Endpoint catalog ────────────────────────────────────────────────
-# Single source of truth. Drives x402 middleware routes, /services.json,
-# /llms.txt, /.well-known/x402.json, and the root JSON response. Add a
-# new entry here + one handler below = new endpoint everywhere.
-
+# Order: /<thing>/search before /<thing>/{app_number} so the more specific
+# x402 route wins.
 
 ENDPOINT_CATALOG: list[dict] = [
-    # ── REPLACE: paid endpoints ──
     {
         "method": "GET",
-        "path": "/example",
-        "route_pattern": "GET /example",
-        "description": "REPLACE: short description of this paid endpoint.",
+        "path": "/trademark/search",
+        "route_pattern": "GET /trademark/search",
+        "description": "Search Norwegian trademarks by text. Returns up to 20 results with name, application number, status, owner, filing date, and Nice classes.",
         "price_usd": "$0.01",
-        "amount_atomic": "10000",  # USDC has 6 decimals; $0.01 = 10000 microUSDC
-        "query_params": {"q": "example"},
+        "amount_atomic": "10000",
+        "query_params": {"q": "equinor"},
         "path_params": {},
-        "output_example": {"result": "replace me"},
-    },
-    # ── Free endpoints (don't remove /health) ──
-    {
-        "method": "GET",
-        "path": "/health",
-        "route_pattern": None,
-        "description": "Service health check.",
-        "price_usd": None,
-        "amount_atomic": None,
-        "query_params": {},
-        "path_params": {},
-        "output_example": {"status": "ok"},
+        "output_example": {
+            "results": [{
+                "name": "EQUINOR", "application_number": "201712345", "status": "Registered",
+                "owner": "Equinor ASA", "filing_date": "2017-11-15", "classes": [4, 37, 42],
+            }],
+            "total": 1,
+        },
     },
     {
         "method": "GET",
-        "path": "/api-status",
-        "route_pattern": None,
-        "description": "Operational status — uptime and cache shape.",
-        "price_usd": None,
-        "amount_atomic": None,
+        "path": "/trademark/{app_number}",
+        "route_pattern": "GET /trademark/*",
+        "description": "Full trademark detail by application number. Includes registration/expiry dates, owner address, Nice class descriptions, representatives.",
+        "price_usd": "$0.01",
+        "amount_atomic": "10000",
         "query_params": {},
-        "path_params": {},
-        "output_example": None,
+        "path_params": {"app_number": "201712345"},
+        "output_example": {
+            "name": "EQUINOR", "application_number": "201712345", "registration_number": "300123",
+            "status": "Registered", "owner": "Equinor ASA",
+            "owner_address": "Forusbeen 50, 4035 Stavanger",
+            "filing_date": "2017-11-15", "registration_date": "2018-03-20", "expiry_date": "2028-03-20",
+            "classes_detailed": [{"number": 4, "description": "Industrial oils and greases"}],
+            "representatives": [{"name": "Zacco Norway AS"}],
+        },
     },
+    {
+        "method": "GET",
+        "path": "/patent/search",
+        "route_pattern": "GET /patent/search",
+        "description": "Search Norwegian patents by text. Returns up to 20 results with title, application number, status, applicant, filing date, IPC codes.",
+        "price_usd": "$0.01",
+        "amount_atomic": "10000",
+        "query_params": {"q": "subsea"},
+        "path_params": {},
+        "output_example": {
+            "results": [{
+                "title": "Method for subsea processing", "application_number": "20201234",
+                "status": "Granted", "applicant": "Equinor Energy AS",
+                "filing_date": "2020-06-15", "ipc_codes": ["E21B 43/36"],
+            }],
+            "total": 1,
+        },
+    },
+    {
+        "method": "GET",
+        "path": "/patent/{app_number}",
+        "route_pattern": "GET /patent/*",
+        "description": "Full patent record by application number. Includes inventors, publication/grant dates, abstract, IPC codes, claim count.",
+        "price_usd": "$0.02",
+        "amount_atomic": "20000",
+        "query_params": {},
+        "path_params": {"app_number": "20201234"},
+        "output_example": {
+            "title": "Method for subsea processing", "application_number": "20201234",
+            "publication_number": "NO340567", "status": "Granted",
+            "applicant": "Equinor Energy AS",
+            "inventors": [{"name": "Ola Nordmann"}],
+            "filing_date": "2020-06-15", "publication_date": "2021-01-10",
+            "grant_date": "2022-03-15",
+            "abstract": "A method for subsea processing of hydrocarbons...",
+            "ipc_codes": ["E21B 43/36", "E21B 43/01"], "claims_count": 12,
+        },
+    },
+    {
+        "method": "GET",
+        "path": "/design/search",
+        "route_pattern": "GET /design/search",
+        "description": "Search registered industrial designs. Returns title, application number, status, owner, filing date, Locarno class.",
+        "price_usd": "$0.01",
+        "amount_atomic": "10000",
+        "query_params": {"q": "platform"},
+        "path_params": {},
+        "output_example": {
+            "results": [{
+                "title": "Offshore platform module", "application_number": "202200456",
+                "status": "Registered", "owner": "Aker Solutions ASA",
+                "filing_date": "2022-02-10", "locarno_class": "23-04",
+            }],
+            "total": 1,
+        },
+    },
+    {"method": "GET", "path": "/classes", "route_pattern": None,
+     "description": "Nice classification reference (45 classes of goods and services).",
+     "price_usd": None, "amount_atomic": None, "query_params": {}, "path_params": {}, "output_example": None},
+    {"method": "GET", "path": "/health", "route_pattern": None,
+     "description": "Service health check.",
+     "price_usd": None, "amount_atomic": None, "query_params": {}, "path_params": {}, "output_example": {"status": "ok"}},
+    {"method": "GET", "path": "/api-status", "route_pattern": None,
+     "description": "Operational status — uptime, cache shape, and Patentstyret-key readiness.",
+     "price_usd": None, "amount_atomic": None, "query_params": {}, "path_params": {}, "output_example": None},
 ]
 
 
@@ -204,67 +271,50 @@ def _bazaar_info(entry: dict) -> dict:
     if entry["path_params"]:
         inp["pathParams"] = entry["path_params"]
     return {
-        "info": {
-            "input": inp,
-            "output": {"type": "json", "example": entry["output_example"]},
-        },
-        "schema": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "properties": {"input": {"type": "object"}, "output": {"type": "object"}},
-        },
+        "info": {"input": inp, "output": {"type": "json", "example": entry["output_example"]}},
+        "schema": {"$schema": "https://json-schema.org/draft/2020-12/schema",
+                   "type": "object",
+                   "properties": {"input": {"type": "object"}, "output": {"type": "object"}}},
     }
 
 
 def _build_paid_routes(catalog: list[dict]) -> dict[str, RouteConfig]:
     return {
         e["route_pattern"]: RouteConfig(
-            accepts=[
-                PaymentOption(
-                    scheme="exact",
-                    pay_to=EVM_ADDRESS,
-                    price=e["price_usd"],
-                    network=EVM_NETWORK,
-                ),
-            ],
+            accepts=[PaymentOption(scheme="exact", pay_to=EVM_ADDRESS, price=e["price_usd"], network=EVM_NETWORK)],
             mime_type="application/json",
             description=e["description"],
             extensions={"bazaar": _bazaar_info(e)},
         )
-        for e in catalog
-        if e["route_pattern"] is not None
+        for e in catalog if e["route_pattern"] is not None
     }
 
 
 routes = _build_paid_routes(ENDPOINT_CATALOG)
 app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
-# ── HTTP client (reuse for upstream API calls) ──────────────────────
+# ── Shared HTTP client ──────────────────────────────────────────────
 
 _http = httpx.AsyncClient(timeout=30, headers={"Accept": "application/json"})
-
-# ── Discovery / metadata endpoints ──────────────────────────────────
 
 _PROCESS_START_TS = time.time()
 
 
+# ── Discovery / metadata endpoints ──────────────────────────────────
+
+
 @app.get("/")
 async def landing(request: Request):
-    """Content-negotiate: HTML for browsers, JSON for API clients."""
     accept = request.headers.get("accept", "")
     if "text/html" in accept and os.path.isfile("static/index.html"):
         return FileResponse("static/index.html")
     return {
-        "service": SERVICE_NAME,
-        "version": "0.1.0",
-        "description": SERVICE_DESCRIPTION,
-        "endpoints": {
-            e["path"]: f"{e['description']} ({e['price_usd']} USDC)" if e["price_usd"]
-            else f"{e['description']} (free)"
-            for e in ENDPOINT_CATALOG
-        }
-        | {"/.well-known/x402.json": "Agent discovery"},
+        "service": SERVICE_NAME, "version": "0.1.0", "description": SERVICE_DESCRIPTION,
+        "endpoints": {e["path"]: f"{e['description']} ({e['price_usd']} USDC)" if e["price_usd"]
+                      else f"{e['description']} (free)"
+                      for e in ENDPOINT_CATALOG} | {"/.well-known/x402.json": "Agent discovery"},
         "payment": "x402 protocol — USDC on Base network",
+        "data_source": "Patentstyret (developer.patentstyret.no)",
     }
 
 
@@ -275,92 +325,54 @@ async def health():
 
 @app.get("/api-status")
 async def api_status():
-    """Free operational status endpoint. Extend with cache stats etc."""
     return {
-        "status": "ok",
-        "service": SERVICE_ID,
-        "version": "0.1.0",
+        "status": "ok", "service": SERVICE_ID, "version": "0.1.0",
         "uptime_seconds": int(time.time() - _PROCESS_START_TS),
+        "upstream": "api.patentstyret.no",
+        "upstream_key_configured": ps.have_api_key(),
+        "cache": cache.stats(),
     }
+
+
+@app.get("/classes")
+async def list_classes():
+    cs = nice_classes.all_classes()
+    return {"count": len(cs), "classes": cs}
 
 
 @app.get("/services.json")
 async def services_manifest():
-    """Agentic Market / Bazaar service manifest for auto-discovery."""
     return {
-        "id": SERVICE_ID,
-        "name": SERVICE_NAME,
-        "description": SERVICE_DESCRIPTION,
-        "category": SERVICE_CATEGORY,
-        "x402Version": 2,
-        "networks": [EVM_NETWORK],
+        "id": SERVICE_ID, "name": SERVICE_NAME, "description": SERVICE_DESCRIPTION,
+        "category": SERVICE_CATEGORY, "x402Version": 2, "networks": [EVM_NETWORK],
         "website": SITE_URL,
-        "endpoints": [
-            {
-                "method": e["method"],
-                "path": e["path"],
-                "description": e["description"],
-                "price": e["price_usd"] or "$0.00",
-                "currency": "USDC",
-            }
-            for e in ENDPOINT_CATALOG
-        ],
+        "endpoints": [{"method": e["method"], "path": e["path"], "description": e["description"],
+                       "price": e["price_usd"] or "$0.00", "currency": "USDC"}
+                      for e in ENDPOINT_CATALOG],
     }
 
 
 @app.get("/.well-known/x402.json")
 async def x402_manifest():
-    """x402 agent-discovery manifest, generated from the endpoint catalog."""
     return {
         "x402Version": 2,
-        "service": {
-            "id": SERVICE_ID,
-            "name": SERVICE_NAME,
-            "description": SERVICE_DESCRIPTION,
-            "category": SERVICE_CATEGORY,
-            "website": SITE_URL,
-            "documentation": f"{SITE_URL}/llms.txt",
-            "servicesManifest": f"{SITE_URL}/services.json",
-        },
-        "payment": {
-            "schemes": ["exact"],
-            "networks": [EVM_NETWORK],
-            "asset": {
-                "symbol": "USDC",
-                "decimals": 6,
-                "address": USDC_BASE_MAINNET,
-                "chain": "Base",
-            },
-            "payTo": EVM_ADDRESS,
-            "facilitator": FACILITATOR_URL,
-        },
+        "service": {"id": SERVICE_ID, "name": SERVICE_NAME, "description": SERVICE_DESCRIPTION,
+                    "category": SERVICE_CATEGORY, "website": SITE_URL,
+                    "documentation": f"{SITE_URL}/llms.txt",
+                    "servicesManifest": f"{SITE_URL}/services.json"},
+        "payment": {"schemes": ["exact"], "networks": [EVM_NETWORK],
+                    "asset": {"symbol": "USDC", "decimals": 6, "address": USDC_BASE_MAINNET, "chain": "Base"},
+                    "payTo": EVM_ADDRESS, "facilitator": FACILITATOR_URL},
         "endpoints": [
-            {
-                "method": e["method"],
-                "path": e["path"],
-                "description": e["description"],
-                "accepts": [
-                    {
-                        "scheme": "exact",
-                        "network": EVM_NETWORK,
-                        "asset": "USDC",
-                        "amount": e["amount_atomic"],
-                        "amountDisplay": e["price_usd"],
-                        "payTo": EVM_ADDRESS,
-                    }
-                ] if e["amount_atomic"] else [],
-                "input": {
-                    "type": "http",
-                    "method": e["method"],
-                    **({"queryParams": e["query_params"]} if e["query_params"] else {}),
-                    **({"pathParams": e["path_params"]} if e["path_params"] else {}),
-                },
-                "output": (
-                    {"type": "json", "example": e["output_example"]}
-                    if e["output_example"] is not None
-                    else {"type": "json"}
-                ),
-            }
+            {"method": e["method"], "path": e["path"], "description": e["description"],
+             "accepts": [{"scheme": "exact", "network": EVM_NETWORK, "asset": "USDC",
+                          "amount": e["amount_atomic"], "amountDisplay": e["price_usd"], "payTo": EVM_ADDRESS}]
+                        if e["amount_atomic"] else [],
+             "input": {"type": "http", "method": e["method"],
+                       **({"queryParams": e["query_params"]} if e["query_params"] else {}),
+                       **({"pathParams": e["path_params"]} if e["path_params"] else {})},
+             "output": ({"type": "json", "example": e["output_example"]}
+                        if e["output_example"] is not None else {"type": "json"})}
             for e in ENDPOINT_CATALOG
         ],
     }
@@ -368,25 +380,22 @@ async def x402_manifest():
 
 @app.get("/llms.txt")
 async def llms_txt():
-    """LLMs.txt convention — agent-readable plain-text manifest."""
-    lines = [
-        f"# {SERVICE_NAME}",
-        f"> {SERVICE_DESCRIPTION}",
-        "",
-        "## Endpoints",
-    ]
+    lines = [f"# {SERVICE_NAME}", f"> {SERVICE_DESCRIPTION}", "", "## Endpoints"]
     for e in ENDPOINT_CATALOG:
         price = f"{e['price_usd']} USDC" if e["price_usd"] else "Free"
         lines.append(f"- {e['method']} {e['path']} — {price} — {e['description']}")
     lines += [
-        "",
-        "## Payment",
+        "", "## Payment",
         "- Protocol: x402 (HTTP 402 micropayments)",
         "- Currency: USDC on Base",
-        "- No API keys or accounts needed",
+        "- No API keys or accounts needed (we handle Patentstyret auth server-side)",
         "- Agent discovery: GET /.well-known/x402.json",
-        "",
-        "## Links",
+        "", "## Source data",
+        "- Patentstyret (developer.patentstyret.no) — official Norwegian IP office",
+        "- Search results cached 24h, detail responses 7d",
+        "", "## Reference data (free)",
+        "- /classes — Nice classification of goods and services (45 classes)",
+        "", "## Links",
         f"- Website: {SITE_URL}",
         f"- Services manifest: {SITE_URL}/services.json",
         "",
@@ -397,38 +406,96 @@ async def llms_txt():
 @app.get("/robots.txt")
 async def robots_txt():
     return PlainTextResponse(
-        "User-agent: *\n"
-        "Allow: /\n"
-        "\n"
-        "# AI crawlers\n"
-        "User-agent: GPTBot\n"
-        "Allow: /\n"
-        "\n"
-        "User-agent: ClaudeBot\n"
-        "Allow: /\n"
-        "\n"
-        "User-agent: PerplexityBot\n"
-        "Allow: /\n"
-        "\n"
-        "User-agent: Google-Extended\n"
-        "Allow: /\n",
+        "User-agent: *\nAllow: /\n\n"
+        "User-agent: GPTBot\nAllow: /\n\n"
+        "User-agent: ClaudeBot\nAllow: /\n\n"
+        "User-agent: PerplexityBot\nAllow: /\n\n"
+        "User-agent: Google-Extended\nAllow: /\n",
         media_type="text/plain",
     )
 
 
-# ── Paid endpoints (REPLACE these with your agent's logic) ──────────
+def _set_cache_header(response: Response, hit: bool) -> None:
+    response.headers["X-Cache"] = "HIT" if hit else "MISS"
 
 
-@app.get("/example")
-async def example_endpoint(q: str = Query(..., min_length=1, max_length=200)):
-    """REPLACE: this is a paid endpoint. Add your business logic here.
+def _ps_error(e: PatentstyretError) -> HTTPException:
+    return HTTPException(status_code=e.status_code, detail=e.message)
 
-    The x402 middleware has already verified payment by the time this
-    handler runs. Returning a non-error response triggers settlement;
-    raising HTTPException with status >= 400 cancels settlement (the
-    customer is not charged).
-    """
-    return {"q": q, "result": "replace me with real data"}
+
+# ── Paid endpoints ──────────────────────────────────────────────────
+
+
+@app.get("/trademark/search")
+async def trademark_search(
+    response: Response,
+    q: str = Query(..., min_length=1, max_length=200, description="Search text"),
+    limit: int = Query(20, ge=1, le=50),
+):
+    try:
+        data, hit = await ps.trademark_search(_http, q, limit=limit)
+    except PatentstyretError as e:
+        raise _ps_error(e)
+    _set_cache_header(response, hit)
+    return parsers.parse_trademark_search(data, limit=limit)
+
+
+@app.get("/trademark/{app_number}")
+async def trademark_detail(
+    response: Response,
+    app_number: str,
+):
+    if not app_number or len(app_number) > 32:
+        raise HTTPException(400, "Invalid application number")
+    try:
+        data, hit = await ps.trademark_detail(_http, app_number)
+    except PatentstyretError as e:
+        raise _ps_error(e)
+    _set_cache_header(response, hit)
+    return parsers.parse_trademark_detail(data)
+
+
+@app.get("/patent/search")
+async def patent_search(
+    response: Response,
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=50),
+):
+    try:
+        data, hit = await ps.patent_search(_http, q, limit=limit)
+    except PatentstyretError as e:
+        raise _ps_error(e)
+    _set_cache_header(response, hit)
+    return parsers.parse_patent_search(data, limit=limit)
+
+
+@app.get("/patent/{app_number}")
+async def patent_detail(
+    response: Response,
+    app_number: str,
+):
+    if not app_number or len(app_number) > 32:
+        raise HTTPException(400, "Invalid application number")
+    try:
+        data, hit = await ps.patent_detail(_http, app_number)
+    except PatentstyretError as e:
+        raise _ps_error(e)
+    _set_cache_header(response, hit)
+    return parsers.parse_patent_detail(data)
+
+
+@app.get("/design/search")
+async def design_search(
+    response: Response,
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=50),
+):
+    try:
+        data, hit = await ps.design_search(_http, q, limit=limit)
+    except PatentstyretError as e:
+        raise _ps_error(e)
+    _set_cache_header(response, hit)
+    return parsers.parse_design_search(data, limit=limit)
 
 
 # ── Static files ────────────────────────────────────────────────────
