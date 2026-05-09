@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for x402-norway-ip."""
+"""Shared pytest fixtures for x402-norway-patent-search."""
 import os
 import sys
 

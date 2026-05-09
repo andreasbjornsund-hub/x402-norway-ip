@@ -1,7 +1,7 @@
 [project]
-name = "x402-norway-ip"
+name = "x402-norway-patent-search"
 version = "0.1.0"
-description = "Norwegian IP Search x402 API (Patentstyret trademarks/patents/designs)"
+description = "Norway Patent Search x402 API (Patentstyret patents/trademarks/designs)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

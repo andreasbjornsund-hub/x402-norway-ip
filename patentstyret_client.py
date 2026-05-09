@@ -21,7 +21,7 @@ import httpx
 import cache
 
 
-USER_AGENT = "x402agent-norway-ip/1.0 github.com/andreasbjornsund-hub"
+USER_AGENT = "x402agent-norway-patent-search/1.0 github.com/andreasbjornsund-hub"
 BASE = os.getenv("PATENTSTYRET_BASE_URL", "https://api.patentstyret.no")
 
 # Stay polite — Patentstyret's docs don't publish a hard limit but Azure APIM
@@ -54,7 +54,7 @@ async def _get(client: httpx.AsyncClient, path: str, params: dict | None, ttl: f
             503,
             "PATENTSTYRET_API_KEY not configured. Sign up at developer.patentstyret.no, "
             "subscribe to the relevant product, and run `flyctl secrets set "
-            "-a x402-norway-ip PATENTSTYRET_API_KEY=<your-key>`.",
+            "-a x402-norway-patent-search PATENTSTYRET_API_KEY=<your-key>`.",
         )
     import json as _json
     cache_key = f"ps:{path}:{_json.dumps(params or {}, sort_keys=True)}"

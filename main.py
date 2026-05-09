@@ -1,5 +1,5 @@
 """
-x402-norway-ip — Norwegian IP Search
+x402-norway-patent-search — Norway Patent Search
 
 x402 micropayment API wrapping Patentstyret's trademark, patent, and design
 APIs into a single agent-friendly service.
@@ -55,18 +55,19 @@ load_dotenv()
 
 # ── Config ──────────────────────────────────────────────────────────
 
-SERVICE_ID = "norway-ip"
-SERVICE_NAME = "Norwegian IP Search"
+SERVICE_ID = "norway-patent-search"
+SERVICE_NAME = "Norway Patent Search"
 SERVICE_DESCRIPTION = (
-    "Search trademarks, patents, and designs from Patentstyret — Norway's "
-    "Industrial Property Office. Pay per query with USDC via x402."
+    "Search Norwegian patents, trademarks, and registered designs from "
+    "Patentstyret — Norway's Industrial Property Office. Pay per query "
+    "with USDC via x402."
 )
 SERVICE_CATEGORY = "data"
 
 EVM_ADDRESS = os.getenv("EVM_ADDRESS")
 EVM_NETWORK: Network = "eip155:8453"
 FACILITATOR_URL = os.getenv("FACILITATOR_URL", "https://x402.org/facilitator")
-SITE_URL = os.getenv("SITE_URL", "https://x402-norway-ip.fly.dev")
+SITE_URL = os.getenv("SITE_URL", "https://x402-norway-patent-search.fly.dev")
 USDC_BASE_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
 if not EVM_ADDRESS:

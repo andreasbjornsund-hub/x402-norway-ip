@@ -9,7 +9,7 @@ from fastapi import HTTPException, Response
 async def test_health(main_module):
     r = await main_module.health()
     assert r["status"] == "ok"
-    assert r["service"] == "norway-ip"
+    assert r["service"] == "norway-patent-search"
 
 
 async def test_classes_endpoint(main_module, nice_module):
